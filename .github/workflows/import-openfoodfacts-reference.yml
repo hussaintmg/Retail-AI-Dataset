@@ -26,17 +26,33 @@ jobs:
           mkdir -p "$D/images/train" "$D/images/val" "$D/images/test" "$D/labels/train" "$D/labels/val" "$D/labels/test"
 
           wget -q https://openfoodfacts-images.s3.eu-west-3.amazonaws.com/data/data_keys.gz -O /tmp/data_keys.gz
-          zcat /tmp/data_keys.gz | grep -E '\.400\.jpg$' | awk 'NR % 2500 == 1' | head -n 1200 > /tmp/keys.txt
 
           python - <<'PY'
-          import hashlib, pathlib, urllib.request
+          import gzip, hashlib, pathlib, urllib.request
+
           root = pathlib.Path('datasets/product_recognition/openfoodfacts_reference_real')
           base = 'https://openfoodfacts-images.s3.eu-west-3.amazonaws.com/'
-          keys = [x.strip() for x in pathlib.Path('/tmp/keys.txt').read_text().splitlines() if x.strip()]
+
+          # Deterministically sample real 400px product photographs from the official image index.
+          keys = []
+          matched = 0
+          with gzip.open('/tmp/data_keys.gz', 'rt', encoding='utf-8', errors='ignore') as fh:
+              for raw in fh:
+                  key = raw.strip()
+                  if not key.endswith('.400.jpg'):
+                      continue
+                  if matched % 2500 == 0:
+                      keys.append(key)
+                      if len(keys) >= 1200:
+                          break
+                  matched += 1
+
           ok = 0
+          seen_barcodes = set()
           for key in keys:
               parts = key.split('/')
-              if len(parts) < 6:
+              # OFF image paths are products/<3>/<3>/<3>/<rest>/<image>.jpg
+              if len(parts) < 6 or parts[0] != 'products':
                   continue
               barcode = ''.join(parts[1:-1])
               if not barcode.isdigit():
@@ -47,17 +63,31 @@ jobs:
               out = root/'images'/split/fname
               try:
                   urllib.request.urlretrieve(base + key, out)
+                  if out.stat().st_size < 1000:
+                      out.unlink(missing_ok=True)
+                      continue
               except Exception:
+                  out.unlink(missing_ok=True)
                   continue
               (root/'labels'/split/(out.stem + '.txt')).write_text(barcode + '\n', encoding='utf-8')
+              seen_barcodes.add(barcode)
               ok += 1
+
           (root/'data.yaml').write_text(
-              'task: product_reference\nformat: image_to_gtin\ntrain: images/train\nval: images/val\ntest: images/test\nlabels: labels/{split}/{image_stem}.txt\n',
+              'task: product_reference\n'
+              'format: image_to_gtin\n'
+              'train: images/train\n'
+              'val: images/val\n'
+              'test: images/test\n'
+              'labels: labels/{split}/{image_stem}.txt\n',
               encoding='utf-8'
           )
           print('Imported', ok, 'real Open Food Facts packaging images')
+          print('Unique GTINs:', len(seen_barcodes))
           if ok < 800:
               raise SystemExit(f'only {ok} images downloaded')
+          if len(seen_barcodes) < 500:
+              raise SystemExit(f'only {len(seen_barcodes)} unique GTINs')
           PY
 
       - name: Verify clean dataset
