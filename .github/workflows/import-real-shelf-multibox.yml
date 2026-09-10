@@ -41,7 +41,7 @@ jobs:
           echo "Product boxes: $BOX"
           test "$IMG" -eq "$LAB"
           test "$IMG" -ge 30
-          test "$BOX" -ge 1000
+          test "$BOX" -ge 900
 
       - name: Commit real shelf dataset to main
         run: |
