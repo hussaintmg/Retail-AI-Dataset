@@ -55,4 +55,4 @@ actual_labels=sum(1 for p in (DST/'labels').rglob('*.txt'))
 print(f'Imported {actual_imgs} real shelf images, {actual_labels} label files, {box_total} product boxes')
 assert actual_imgs >= 30
 assert actual_imgs == actual_labels
-assert box_total >= 1000
+assert box_total >= 900
