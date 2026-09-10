@@ -1,0 +1,81 @@
+name: Import Real Open Food Facts Product Reference Batch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/import-openfoodfacts-reference.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-openfoodfacts:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Import deterministic real packaging-image batch
+        run: |
+          set -euo pipefail
+          D=datasets/product_recognition/openfoodfacts_reference_real
+          rm -rf "$D"
+          mkdir -p "$D/images/train" "$D/images/val" "$D/images/test" "$D/labels/train" "$D/labels/val" "$D/labels/test"
+
+          wget -q https://openfoodfacts-images.s3.eu-west-3.amazonaws.com/data/data_keys.gz -O /tmp/data_keys.gz
+          zcat /tmp/data_keys.gz | grep -E '\.400\.jpg$' | awk 'NR % 2500 == 1' | head -n 1200 > /tmp/keys.txt
+
+          python - <<'PY'
+          import hashlib, pathlib, urllib.request
+          root = pathlib.Path('datasets/product_recognition/openfoodfacts_reference_real')
+          base = 'https://openfoodfacts-images.s3.eu-west-3.amazonaws.com/'
+          keys = [x.strip() for x in pathlib.Path('/tmp/keys.txt').read_text().splitlines() if x.strip()]
+          ok = 0
+          for key in keys:
+              parts = key.split('/')
+              if len(parts) < 6:
+                  continue
+              barcode = ''.join(parts[1:-1])
+              if not barcode.isdigit():
+                  continue
+              h = int(hashlib.sha1(key.encode()).hexdigest()[:8], 16) % 100
+              split = 'train' if h < 70 else ('val' if h < 85 else 'test')
+              fname = key.replace('/','__')
+              out = root/'images'/split/fname
+              try:
+                  urllib.request.urlretrieve(base + key, out)
+              except Exception:
+                  continue
+              (root/'labels'/split/(out.stem + '.txt')).write_text(barcode + '\n', encoding='utf-8')
+              ok += 1
+          (root/'data.yaml').write_text(
+              'task: product_reference\nformat: image_to_gtin\ntrain: images/train\nval: images/val\ntest: images/test\nlabels: labels/{split}/{image_stem}.txt\n',
+              encoding='utf-8'
+          )
+          print('Imported', ok, 'real Open Food Facts packaging images')
+          if ok < 800:
+              raise SystemExit(f'only {ok} images downloaded')
+          PY
+
+      - name: Verify clean dataset
+        run: |
+          set -euo pipefail
+          D=datasets/product_recognition/openfoodfacts_reference_real
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' \) | grep -q .; then exit 1; fi
+          IMG=$(find "$D/images" -type f -name '*.jpg' | wc -l)
+          LAB=$(find "$D/labels" -type f -name '*.txt' | wc -l)
+          echo "Open Food Facts images: $IMG"
+          echo "GTIN labels: $LAB"
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 800
+
+      - name: Commit real product-reference batch to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/product_recognition/openfoodfacts_reference_real
+          git commit -m 'dataset: add real Open Food Facts product reference batch' || exit 0
+          git push origin HEAD:main
