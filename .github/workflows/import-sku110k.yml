@@ -1,0 +1,100 @@
+name: Import Real SKU110K Dense Shelf Dataset
+
+on:
+  push:
+    paths:
+      - '.github/workflows/import-sku110k.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-real-dense-shelves:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ultralytics
+        run: pip install --disable-pip-version-check ultralytics
+
+      - name: Download official SKU-110K and convert to YOLO
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/retail-datasets
+          cd /tmp/retail-datasets
+          python - <<'PY'
+          from ultralytics.utils.downloads import download
+          from ultralytics.utils import ASSETS_URL
+          import urllib.request
+          yaml_url='https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/cfg/datasets/SKU-110K.yaml'
+          urllib.request.urlretrieve(yaml_url, 'SKU-110K.yaml')
+          from ultralytics.data.utils import check_det_dataset
+          d=check_det_dataset('SKU-110K.yaml', autodownload=True)
+          print(d)
+          PY
+
+      - name: Locate and normalize dataset
+        run: |
+          set -euo pipefail
+          SRC=$(find /tmp /home/runner -type d -name 'SKU-110K' 2>/dev/null | head -1)
+          test -n "$SRC"
+          DEST="$GITHUB_WORKSPACE/datasets/retail_detection/sku110k_real"
+          rm -rf "$DEST"
+          mkdir -p "$DEST/images/train" "$DEST/images/val" "$DEST/images/test" "$DEST/labels/train" "$DEST/labels/val" "$DEST/labels/test"
+          python - "$SRC" "$DEST" <<'PY'
+          import sys, shutil
+          from pathlib import Path
+          src, dst = map(Path, sys.argv[1:])
+          def resolve_list(name):
+              p=src/name
+              if not p.exists(): return []
+              out=[]
+              for line in p.read_text().splitlines():
+                  line=line.strip()
+                  if not line: continue
+                  q=Path(line)
+                  if not q.is_absolute(): q=src/q
+                  if q.exists(): out.append(q)
+              return out
+          for split in ('train','val','test'):
+              imgs=resolve_list(f'{split}.txt')
+              if not imgs:
+                  candidates=list((src/'images'/split).glob('*')) if (src/'images'/split).exists() else []
+                  imgs=[p for p in candidates if p.suffix.lower() in {'.jpg','.jpeg','.png'}]
+              for i,p in enumerate(imgs):
+                  name=f'{split}_{i:06d}{p.suffix.lower()}'
+                  shutil.copy2(p, dst/'images'/split/name)
+                  possible=[src/'labels'/split/(p.stem+'.txt'), p.parent.parent/'labels'/(p.stem+'.txt'), p.with_suffix('.txt')]
+                  lab=next((x for x in possible if x.exists()), None)
+                  if lab: shutil.copy2(lab, dst/'labels'/split/(Path(name).stem+'.txt'))
+          (dst/'data.yaml').write_text('path: .\ntrain: images/train\nval: images/val\ntest: images/test\n\nnames:\n  0: product\n')
+          PY
+
+      - name: Verify real dense shelf dataset
+        run: |
+          set -euo pipefail
+          D=datasets/retail_detection/sku110k_real
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' \) | grep -q .; then exit 1; fi
+          IMG=$(find "$D/images" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l)
+          LAB=$(find "$D/labels" -type f -name '*.txt' | wc -l)
+          echo "SKU110K real images: $IMG"
+          echo "YOLO labels: $LAB"
+          test "$IMG" -ge 11000
+          test "$LAB" -ge 11000
+
+      - name: Commit dataset directly to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/retail_detection/sku110k_real
+          git commit -m 'dataset: import real SKU110K dense retail shelves' || exit 0
+          git push origin HEAD:main
