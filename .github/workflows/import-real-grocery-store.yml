@@ -1,0 +1,49 @@
+name: Import Real Grocery Store Dataset
+
+on:
+  push:
+    paths:
+      - 'tools/import_real_grocery_store.py'
+      - '.github/workflows/import-real-grocery-store.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-real:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Import real grocery images
+        run: python tools/import_real_grocery_store.py
+
+      - name: Verify clean dataset folder
+        run: |
+          set -e
+          if find datasets -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' \) | grep -q .; then
+            echo 'Forbidden docs/scripts found inside datasets/'
+            exit 1
+          fi
+          IMG=$(find datasets/product_recognition/grocery_store_real/images -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l)
+          LAB=$(find datasets/product_recognition/grocery_store_real/labels -type f -name '*.txt' | wc -l)
+          echo "Real images: $IMG"
+          echo "Labels: $LAB"
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 5000
+
+      - name: Commit real dataset to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/product_recognition/grocery_store_real
+          git commit -m "dataset: import real GroceryStoreDataset" || exit 0
+          git push origin HEAD:main
