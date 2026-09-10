@@ -1,0 +1,160 @@
+name: Build Retail Golden Test Set V1
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-retail-golden-test-v1.yml'
+      - 'datasets/product_recognition/grocery_store_real/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-golden-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build deterministic balanced real-image golden test set
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json, shutil
+
+          src = Path('datasets/product_recognition/grocery_store_real')
+          out = Path('datasets/test_sets/retail_golden_v1')
+          qa = Path('qa')
+          prov = Path('provenance')
+
+          if not src.exists():
+              raise SystemExit('source grocery_store_real dataset missing')
+
+          shutil.rmtree(out, ignore_errors=True)
+          (out/'images'/'test').mkdir(parents=True, exist_ok=True)
+          (out/'labels'/'test').mkdir(parents=True, exist_ok=True)
+          qa.mkdir(exist_ok=True)
+          prov.mkdir(exist_ok=True)
+
+          by_class = {}
+          for lab in sorted((src/'labels'/'test').glob('*.txt')):
+              txt = lab.read_text(encoding='utf-8').strip()
+              if not txt:
+                  continue
+              cls = txt.split()[0]
+              try:
+                  cls_id = int(cls)
+              except ValueError:
+                  continue
+              img = src/'images'/'test'/(lab.stem + '.jpg')
+              if not img.exists():
+                  continue
+              by_class.setdefault(cls_id, []).append((img, lab))
+
+          if len(by_class) < 70:
+              raise SystemExit(f'insufficient class coverage in source test split: {len(by_class)}')
+
+          selected = []
+          TARGET_PER_CLASS = 12
+          MIN_PER_CLASS = 3
+          for cls_id, pairs in sorted(by_class.items()):
+              ranked = sorted(
+                  pairs,
+                  key=lambda p: hashlib.sha256((str(cls_id)+'|'+p[0].name).encode()).hexdigest()
+              )
+              take = min(TARGET_PER_CLASS, len(ranked))
+              if take < MIN_PER_CLASS:
+                  raise SystemExit(f'class {cls_id} has only {take} valid test images')
+              selected.extend((cls_id, *p) for p in ranked[:take])
+
+          hashes = []
+          counts = {}
+          for cls_id, img, lab in selected:
+              dst_img = out/'images'/'test'/img.name
+              dst_lab = out/'labels'/'test'/lab.name
+              shutil.copy2(img, dst_img)
+              shutil.copy2(lab, dst_lab)
+              digest = hashlib.sha256(dst_img.read_bytes()).hexdigest()
+              hashes.append(f'{digest}  {dst_img.as_posix()}')
+              counts[str(cls_id)] = counts.get(str(cls_id), 0) + 1
+
+          source_yaml = (src/'data.yaml').read_text(encoding='utf-8')
+          names_block = source_yaml[source_yaml.index('names:'):]
+          (out/'data.yaml').write_text(
+              'path: .\n'
+              'test: images/test\n'
+              'task: classification\n'
+              'locked: true\n'
+              'purpose: final_model_evaluation_only\n\n' + names_block,
+              encoding='utf-8'
+          )
+
+          (qa/'retail_golden_v1.sha256').write_text('\n'.join(hashes) + '\n', encoding='utf-8')
+          (prov/'retail_golden_v1.json').write_text(json.dumps({
+              'dataset': 'retail_golden_v1',
+              'source': 'datasets/product_recognition/grocery_store_real/images/test',
+              'selection': 'deterministic_sha256_balanced_by_class',
+              'target_per_class': TARGET_PER_CLASS,
+              'images': len(selected),
+              'classes': len(counts),
+              'class_counts': counts,
+              'rules': [
+                  'real images only',
+                  'official source test split only',
+                  'never use for training or hyperparameter tuning',
+                  'hash locked for regression comparison'
+              ]
+          }, indent=2) + '\n', encoding='utf-8')
+
+          image_count = len(list((out/'images'/'test').glob('*.jpg')))
+          label_count = len(list((out/'labels'/'test').glob('*.txt')))
+          print(f'Golden test: {image_count} images, {label_count} labels, {len(counts)} classes')
+          if image_count != label_count:
+              raise SystemExit('image/label mismatch')
+          if image_count < 400:
+              raise SystemExit(f'test set too small: {image_count}')
+          PY
+
+      - name: Validate zero leakage and dataset cleanliness
+        run: |
+          set -euo pipefail
+          D=datasets/test_sets/retail_golden_v1
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' -o -name '*.json' \) | grep -q .; then
+            echo 'Non-dataset text/script file found inside datasets/'
+            exit 1
+          fi
+          IMG=$(find "$D/images/test" -type f -name '*.jpg' | wc -l)
+          LAB=$(find "$D/labels/test" -type f -name '*.txt' | wc -l)
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 400
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root = Path('datasets/product_recognition/grocery_store_real')
+          golden = Path('datasets/test_sets/retail_golden_v1/images/test')
+          train_hashes = {hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'images'/'train').glob('*.jpg')}
+          val_hashes = {hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'images'/'val').glob('*.jpg')}
+          leaked = []
+          for p in golden.glob('*.jpg'):
+              h = hashlib.sha256(p.read_bytes()).hexdigest()
+              if h in train_hashes or h in val_hashes:
+                  leaked.append(p.name)
+          if leaked:
+              raise SystemExit(f'leakage detected: {len(leaked)} images')
+          print('Leakage check: PASS')
+          PY
+
+      - name: Commit golden test set to main
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/test_sets/retail_golden_v1 qa/retail_golden_v1.sha256 provenance/retail_golden_v1.json
+          git commit -m 'dataset: add locked real retail golden test set v1' || exit 0
+          git push origin HEAD:main
