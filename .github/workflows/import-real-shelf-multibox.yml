@@ -1,0 +1,52 @@
+name: Import Real Multi-Box Shelf Dataset
+
+on:
+  push:
+    paths:
+      - 'tools/import_real_shelf_multibox.py'
+      - '.github/workflows/import-real-shelf-multibox.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-real-shelves:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Import real multi-object shelf images
+        run: python tools/import_real_shelf_multibox.py
+
+      - name: Verify dataset cleanliness
+        run: |
+          set -e
+          if find datasets -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' \) | grep -q .; then
+            echo 'Forbidden docs/scripts found inside datasets/'
+            exit 1
+          fi
+          IMG=$(find datasets/retail_detection/supervisely_shelves_real/images -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l)
+          LAB=$(find datasets/retail_detection/supervisely_shelves_real/labels -type f -name '*.txt' | wc -l)
+          BOX=$(cat datasets/retail_detection/supervisely_shelves_real/labels/*/*.txt | wc -l)
+          echo "Real shelf images: $IMG"
+          echo "Label files: $LAB"
+          echo "Product boxes: $BOX"
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 30
+          test "$BOX" -ge 1000
+
+      - name: Commit real shelf dataset to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/retail_detection/supervisely_shelves_real
+          git commit -m 'dataset: import real multi-box supermarket shelf images' || exit 0
+          git push origin HEAD:main
