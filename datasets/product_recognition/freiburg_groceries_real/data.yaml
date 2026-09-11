@@ -1,0 +1,32 @@
+path: .
+task: classification
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: CANDY
+  1: JUICE
+  2: VINEGAR
+  3: OIL
+  4: CHOCOLATE
+  5: PASTA
+  6: RICE
+  7: MILK
+  8: SPICES
+  9: HONEY
+  10: JAM
+  11: NUTS
+  12: CHIPS
+  13: SODA
+  14: COFFEE
+  15: BEANS
+  16: TEA
+  17: CORN
+  18: CEREAL
+  19: CAKE
+  20: SUGAR
+  21: WATER
+  22: FLOUR
+  23: TOMATO_SAUCE
+  24: FISH
