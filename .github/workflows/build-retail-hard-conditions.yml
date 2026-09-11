@@ -1,0 +1,96 @@
+name: Build Retail Camera Hard Conditions
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-retail-hard-conditions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Pillow
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Build realistic CCTV robustness corpus from real shelves
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
+          import random, shutil
+
+          src=Path('datasets/retail_detection/supervisely_shelves_real')
+          dst=Path('datasets/robustness/shelf_camera_conditions_real_derived')
+          if dst.exists(): shutil.rmtree(dst)
+          random.seed(260911)
+          variants=('low_light','motion_blur','defocus','compression','glare','low_contrast')
+          count=0
+          for split in ('train','val','test'):
+              (dst/'images'/split).mkdir(parents=True,exist_ok=True)
+              (dst/'labels'/split).mkdir(parents=True,exist_ok=True)
+              for ip in sorted((src/'images'/split).glob('*')):
+                  if ip.suffix.lower() not in {'.jpg','.jpeg','.png'}: continue
+                  lp=src/'labels'/split/(ip.stem+'.txt')
+                  if not lp.exists(): continue
+                  base=Image.open(ip).convert('RGB')
+                  for v in variants:
+                      im=base.copy()
+                      if v=='low_light':
+                          im=ImageEnhance.Brightness(im).enhance(0.35)
+                          im=ImageEnhance.Contrast(im).enhance(1.15)
+                      elif v=='motion_blur':
+                          # directional smear approximated with repeated small horizontal offsets
+                          layers=[]
+                          for off in (-4,-2,0,2,4):
+                              shifted=Image.new('RGB',im.size)
+                              shifted.paste(im,(off,0)); layers.append(shifted)
+                          acc=layers[0]
+                          from PIL import ImageChops
+                          for lay in layers[1:]: acc=Image.blend(acc,lay,0.5)
+                          im=acc.filter(ImageFilter.GaussianBlur(0.7))
+                      elif v=='defocus': im=im.filter(ImageFilter.GaussianBlur(2.2))
+                      elif v=='compression':
+                          from io import BytesIO
+                          b=BytesIO(); im.save(b,format='JPEG',quality=28); b.seek(0); im=Image.open(b).convert('RGB')
+                      elif v=='glare':
+                          overlay=Image.new('RGBA',im.size,(0,0,0,0)); d=ImageDraw.Draw(overlay)
+                          W,H=im.size; x=int(W*0.72); y=int(H*0.22); r=max(30,int(min(W,H)*0.12))
+                          for rr,a in ((r,35),(int(r*.65),55),(int(r*.35),90)):
+                              d.ellipse((x-rr,y-rr,x+rr,y+rr),fill=(255,255,255,a))
+                          im=Image.alpha_composite(im.convert('RGBA'),overlay).convert('RGB')
+                      elif v=='low_contrast':
+                          im=ImageEnhance.Contrast(im).enhance(0.45)
+                          im=ImageEnhance.Color(im).enhance(0.65)
+                      name=f'{ip.stem}__{v}.jpg'
+                      im.save(dst/'images'/split/name,quality=90)
+                      shutil.copy2(lp,dst/'labels'/split/(Path(name).stem+'.txt'))
+                      count+=1
+          (dst/'data.yaml').write_text('path: .\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n  0: product\n')
+          print('hard-condition real-derived images=',count)
+          if count < 200: raise SystemExit('expected at least 200 hard-condition images')
+          PY
+      - name: Verify
+        run: |
+          set -euo pipefail
+          D=datasets/robustness/shelf_camera_conditions_real_derived
+          IMG=$(find "$D/images" -type f -name '*.jpg' | wc -l)
+          LAB=$(find "$D/labels" -type f -name '*.txt' | wc -l)
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 200
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' -o -name '*.json' \) | grep -q .; then exit 1; fi
+      - name: Commit to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/robustness/shelf_camera_conditions_real_derived
+          git commit -m 'dataset: add real-derived retail camera robustness corpus' || exit 0
+          git pull --rebase origin main
+          git push origin HEAD:main
