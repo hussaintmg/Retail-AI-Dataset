@@ -1,0 +1,106 @@
+name: Import Freiburg Real Grocery Dataset
+
+on:
+  push:
+    paths:
+      - '.github/workflows/import-freiburg-groceries.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-freiburg:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download official Freiburg Groceries Dataset
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 5 --retry-delay 3 \
+            'http://aisdatasets.informatik.uni-freiburg.de/freiburg_groceries_dataset/freiburg_groceries_dataset.tar.gz' \
+            -o /tmp/freiburg.tar.gz
+          mkdir -p /tmp/freiburg
+          tar -xzf /tmp/freiburg.tar.gz -C /tmp/freiburg
+          find /tmp/freiburg -maxdepth 3 -type f | head -n 20
+
+      - name: Normalize 5000 real grocery images
+        run: |
+          set -euo pipefail
+          DEST="$GITHUB_WORKSPACE/datasets/product_recognition/freiburg_groceries_real"
+          rm -rf "$DEST"
+          mkdir -p "$DEST/images/train" "$DEST/images/val" "$DEST/images/test" "$DEST/labels/train" "$DEST/labels/val" "$DEST/labels/test"
+          python - <<'PY'
+          import hashlib, pathlib, shutil
+
+          src = pathlib.Path('/tmp/freiburg')
+          dst = pathlib.Path('datasets/product_recognition/freiburg_groceries_real')
+          classes = [
+              'CANDY','JUICE','VINEGAR','OIL','CHOCOLATE','PASTA','RICE','MILK','SPICES','HONEY',
+              'JAM','NUTS','CHIPS','SODA','COFFEE','BEANS','TEA','CORN','CEREAL','CAKE','SUGAR','WATER',
+              'FLOUR','TOMATO_SAUCE','FISH'
+          ]
+          cid = {c:i for i,c in enumerate(classes)}
+
+          imgs = []
+          for p in src.rglob('*'):
+              if p.is_file() and p.suffix.lower() in {'.jpg','.jpeg','.png'}:
+                  parts_upper = [x.upper() for x in p.parts]
+                  found = next((c for c in classes if c in parts_upper), None)
+                  if found:
+                      imgs.append((p, found))
+
+          if len(imgs) < 4900:
+              raise SystemExit(f'Expected about 5000 real images, found only {len(imgs)}')
+
+          seen_names = set()
+          counts = {'train':0,'val':0,'test':0}
+          for p, cls in sorted(imgs, key=lambda x: str(x[0])):
+              key = f'{cls}/{p.name}/{p.stat().st_size}'
+              h = int(hashlib.sha1(key.encode()).hexdigest()[:8], 16) % 100
+              split = 'train' if h < 70 else ('val' if h < 85 else 'test')
+              stem = f'{cls.lower()}__{p.stem}'
+              name = stem + p.suffix.lower()
+              n = 1
+              while name in seen_names:
+                  n += 1
+                  name = f'{stem}__{n}{p.suffix.lower()}'
+              seen_names.add(name)
+              out = dst/'images'/split/name
+              shutil.copy2(p, out)
+              (dst/'labels'/split/(out.stem + '.txt')).write_text(str(cid[cls])+'\n', encoding='utf-8')
+              counts[split] += 1
+
+          yaml = ['path: .','task: classification','train: images/train','val: images/val','test: images/test','','names:']
+          yaml += [f'  {i}: {c}' for i,c in enumerate(classes)]
+          (dst/'data.yaml').write_text('\n'.join(yaml)+'\n', encoding='utf-8')
+          print('Imported:', len(imgs), 'classes:', len(classes), 'splits:', counts)
+          PY
+
+      - name: Verify dataset quality
+        run: |
+          set -euo pipefail
+          D=datasets/product_recognition/freiburg_groceries_real
+          IMG=$(find "$D/images" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l)
+          LAB=$(find "$D/labels" -type f -name '*.txt' | wc -l)
+          echo "Freiburg real images: $IMG"
+          echo "Classification labels: $LAB"
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 4900
+          test "$(grep -c '^  [0-9].*: ' "$D/data.yaml")" -eq 25
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' \) | grep -q .; then
+            echo 'Forbidden non-dataset files found inside datasets/'
+            exit 1
+          fi
+
+      - name: Commit real dataset to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/product_recognition/freiburg_groceries_real
+          git commit -m 'dataset: add 5000 real Freiburg grocery images' || exit 0
+          git push origin HEAD:main
