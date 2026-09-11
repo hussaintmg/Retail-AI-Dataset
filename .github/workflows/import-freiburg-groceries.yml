@@ -27,7 +27,14 @@ jobs:
           file /tmp/freiburg.tar
           mkdir -p /tmp/freiburg
           tar -xf /tmp/freiburg.tar -C /tmp/freiburg
-          find /tmp/freiburg -maxdepth 3 -type f | head -n 20
+          python - <<'PY'
+          from pathlib import Path
+          for i, p in enumerate(Path('/tmp/freiburg').rglob('*')):
+              if p.is_file():
+                  print(p)
+                  if i >= 19:
+                      break
+          PY
 
       - name: Normalize real grocery images
         run: |
@@ -37,14 +44,9 @@ jobs:
           mkdir -p "$DEST/images/train" "$DEST/images/val" "$DEST/images/test" "$DEST/labels/train" "$DEST/labels/val" "$DEST/labels/test"
           python - <<'PY'
           import hashlib, pathlib, shutil
-
           src = pathlib.Path('/tmp/freiburg')
           dst = pathlib.Path('datasets/product_recognition/freiburg_groceries_real')
-          classes = [
-              'CANDY','JUICE','VINEGAR','OIL','CHOCOLATE','PASTA','RICE','MILK','SPICES','HONEY',
-              'JAM','NUTS','CHIPS','SODA','COFFEE','BEANS','TEA','CORN','CEREAL','CAKE','SUGAR','WATER',
-              'FLOUR','TOMATO_SAUCE','FISH'
-          ]
+          classes = ['CANDY','JUICE','VINEGAR','OIL','CHOCOLATE','PASTA','RICE','MILK','SPICES','HONEY','JAM','NUTS','CHIPS','SODA','COFFEE','BEANS','TEA','CORN','CEREAL','CAKE','SUGAR','WATER','FLOUR','TOMATO_SAUCE','FISH']
           cid = {c:i for i,c in enumerate(classes)}
           imgs = []
           for p in src.rglob('*'):
@@ -55,25 +57,20 @@ jobs:
                       imgs.append((p, found))
           if len(imgs) < 4900:
               raise SystemExit(f'Expected about 5000 real images, found only {len(imgs)}')
-          seen_names = set()
-          counts = {'train':0,'val':0,'test':0}
+          seen_names = set(); counts = {'train':0,'val':0,'test':0}
           for p, cls in sorted(imgs, key=lambda x: str(x[0])):
               key = f'{cls}/{p.name}/{p.stat().st_size}'
               h = int(hashlib.sha1(key.encode()).hexdigest()[:8], 16) % 100
               split = 'train' if h < 70 else ('val' if h < 85 else 'test')
-              stem = f'{cls.lower()}__{p.stem}'
-              name = stem + p.suffix.lower()
-              n = 1
+              stem = f'{cls.lower()}__{p.stem}'; name = stem + p.suffix.lower(); n = 1
               while name in seen_names:
-                  n += 1
-                  name = f'{stem}__{n}{p.suffix.lower()}'
+                  n += 1; name = f'{stem}__{n}{p.suffix.lower()}'
               seen_names.add(name)
               out = dst/'images'/split/name
               shutil.copy2(p, out)
               (dst/'labels'/split/(out.stem + '.txt')).write_text(str(cid[cls])+'\n', encoding='utf-8')
               counts[split] += 1
-          yaml = ['path: .','task: classification','train: images/train','val: images/val','test: images/test','','names:']
-          yaml += [f'  {i}: {c}' for i,c in enumerate(classes)]
+          yaml = ['path: .','task: classification','train: images/train','val: images/val','test: images/test','','names:'] + [f'  {i}: {c}' for i,c in enumerate(classes)]
           (dst/'data.yaml').write_text('\n'.join(yaml)+'\n', encoding='utf-8')
           print('Imported:', len(imgs), 'classes:', len(classes), 'splits:', counts)
           PY
@@ -100,4 +97,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add datasets/product_recognition/freiburg_groceries_real
           git commit -m 'dataset: add real Freiburg grocery images' || exit 0
+          git pull --rebase origin main
           git push origin HEAD:main
