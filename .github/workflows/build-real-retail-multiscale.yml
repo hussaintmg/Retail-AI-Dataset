@@ -1,0 +1,108 @@
+name: Build Real Retail Multiscale Corpus
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-real-retail-multiscale.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install image tooling
+        run: python -m pip install --disable-pip-version-check pillow
+
+      - name: Build real multiscale shelf scenes
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import shutil
+
+          src = Path('datasets/retail_detection/supervisely_shelves_real')
+          dst = Path('datasets/retail_detection/supervisely_shelves_multiscale_real')
+          if dst.exists(): shutil.rmtree(dst)
+
+          total_images = total_boxes = partial_boxes = 0
+          for split in ('train','val','test'):
+              (dst/'images'/split).mkdir(parents=True, exist_ok=True)
+              (dst/'labels'/split).mkdir(parents=True, exist_ok=True)
+              for ip in sorted((src/'images'/split).glob('*')):
+                  if ip.suffix.lower() not in {'.jpg','.jpeg','.png'}: continue
+                  lp = src/'labels'/split/(ip.stem+'.txt')
+                  if not lp.exists(): continue
+                  im = Image.open(ip).convert('RGB'); W,H = im.size
+                  boxes=[]
+                  for line in lp.read_text().splitlines():
+                      if not line.strip(): continue
+                      c,xc,yc,bw,bh = map(float,line.split()[:5])
+                      x1=(xc-bw/2)*W; y1=(yc-bh/2)*H; x2=(xc+bw/2)*W; y2=(yc+bh/2)*H
+                      boxes.append((int(c),x1,y1,x2,y2))
+
+                  windows=[('full',0,0,W,H)]
+                  # overlapping real-image windows: preserve perspective while adding near/far and partial-occlusion cases
+                  for scale in (0.72,0.55):
+                      ww,hh=max(64,int(W*scale)),max(64,int(H*scale))
+                      xs=sorted(set((0,max(0,(W-ww)//2),max(0,W-ww))))
+                      ys=sorted(set((0,max(0,(H-hh)//2),max(0,H-hh))))
+                      for yi,y0 in enumerate(ys):
+                          for xi,x0 in enumerate(xs):
+                              windows.append((f's{int(scale*100)}_{yi}{xi}',x0,y0,x0+ww,y0+hh))
+
+                  for tag,cx1,cy1,cx2,cy2 in windows:
+                      cw,ch=cx2-cx1,cy2-cy1; out=[]
+                      for c,x1,y1,x2,y2 in boxes:
+                          ix1=max(x1,cx1); iy1=max(y1,cy1); ix2=min(x2,cx2); iy2=min(y2,cy2)
+                          if ix2<=ix1 or iy2<=iy1: continue
+                          orig=max(1.0,(x2-x1)*(y2-y1)); vis=((ix2-ix1)*(iy2-iy1))/orig
+                          if vis < 0.30: continue
+                          if vis < 0.98: partial_boxes += 1
+                          nx1,nx2=ix1-cx1,ix2-cx1; ny1,ny2=iy1-cy1,iy2-cy1
+                          if nx2-nx1 < 3 or ny2-ny1 < 3: continue
+                          xc=((nx1+nx2)/2)/cw; yc=((ny1+ny2)/2)/ch
+                          bw=(nx2-nx1)/cw; bh=(ny2-ny1)/ch
+                          out.append(f'{c} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}')
+                      if not out: continue
+                      name=f'{ip.stem}__{tag}.jpg'
+                      im.crop((cx1,cy1,cx2,cy2)).save(dst/'images'/split/name, quality=92, optimize=True)
+                      (dst/'labels'/split/(Path(name).stem+'.txt')).write_text('\n'.join(out)+'\n')
+                      total_images += 1; total_boxes += len(out)
+
+          (dst/'data.yaml').write_text('path: .\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n  0: product\n')
+          print('real multiscale images=',total_images,'boxes=',total_boxes,'partial/occluded boxes=',partial_boxes)
+          if total_images < 250: raise SystemExit('too few derived real scenes')
+          if total_boxes < 1800: raise SystemExit('too few product boxes')
+          if partial_boxes < 100: raise SystemExit('too few partial/occlusion cases')
+          PY
+
+      - name: Verify clean dataset
+        run: |
+          set -euo pipefail
+          D=datasets/retail_detection/supervisely_shelves_multiscale_real
+          IMG=$(find "$D/images" -type f -name '*.jpg' | wc -l)
+          LAB=$(find "$D/labels" -type f -name '*.txt' | wc -l)
+          BOX=$(cat "$D"/labels/*/*.txt | wc -l)
+          echo "images=$IMG labels=$LAB boxes=$BOX"
+          test "$IMG" -eq "$LAB"
+          test "$IMG" -ge 250
+          test "$BOX" -ge 1800
+          if find "$D" -type f \( -name '*.md' -o -name '*.py' -o -name '*.rst' -o -name '*.json' \) | grep -q .; then exit 1; fi
+
+      - name: Commit corpus to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add datasets/retail_detection/supervisely_shelves_multiscale_real
+          git commit -m 'dataset: add real multiscale shelf detection corpus' || exit 0
+          git pull --rebase origin main
+          git push origin HEAD:main
